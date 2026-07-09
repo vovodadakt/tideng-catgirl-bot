@@ -1,37 +1,28 @@
-# Catgirl QQ Bot — Search Pipeline
+# 搜索管线
 
-Qwen3.5-4B-Instruct + QLoRA (think_v3) search + answer pipeline.
+猫娘 AI 模型的搜索问答模块。合并后的模型同时用于关键词提取和猫娘回答。
 
-## Architecture
+## 架构
 
-Phase 1: Base model extracts keywords -> Baidu Baike (Browser) + Moegirl (API) -> if <500c, Bing deep search
-Phase 2: Load LoRA adapter -> Answer all questions
+```
+用户问题 -> 关键词提取 -> 百度百科(Browser) + 萌娘百科(API) -> <500c? -> Bing -> 猫娘回答
+```
 
-Single model: ~5GB VRAM (vs ~10GB for dual-model approach).
+## 运行
 
-## Search Sources
+```bash
+python inference/search/search_pipeline.py
+```
 
-| Source | Method | Description |
-|--------|--------|-------------|
-| Baidu Baike | Playwright browser | Bypasses server IP 403 |
-| Moegirl | API (opensearch + query) | ACG knowledge |
-| Bing | Playwright deep-read | Only triggered when R1 < 500 chars |
+## 搜索源
 
-## Performance (4 questions)
+| 来源 | 方式 | 说明 |
+|------|------|-------------|
+| 百度百科 | Playwright 浏览器 | 绕过服务器 403 |
+| 萌娘百科 | API | ACG 知识 |
+| Bing | Playwright 深度阅读 | R1 < 500c 时触发 |
 
-| Phase | Time |
-|-------|------|
-| Base model load | 4.3s |
-| Search (4 questions) | 171.6s |
-| LoRA load | 4.7s |
-| Answer (4 questions) | 129.9s |
-| **Total** | **310.8s** |
+## 版本
 
-vs V22 dual-model: ~390s — 20% faster, 50% less VRAM.
-
-## Server
-
-- GPU: NVIDIA RTX 4080 SUPER (16 GB)
-- Model: Qwen3.5-4B-Instruct (4-bit nf4) + LoRA r=64 alpha=128
-- VRAM: ~5 GB
-
+- **V22**: 双模型（基膜提取关键词 + LoRA 回答），最稳定
+- **V24**: 单模型 + CPU offload，VRAM 优化
