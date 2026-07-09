@@ -5,18 +5,50 @@
 ## 模型
 
 - **基座**: Qwen3.5-4B-Instruct
-- **微调**: LoRA r=64 alpha=128, 4-bit nf4 量化
-- **合并后大小**: 3.12GB (safetensors), 加载后 ~3.3GB VRAM
-- **路径**: `/root/autodl-tmp/models/Qwen3.5-4B-Catgirl`
+- **微调**: LoRA r=64 alpha=128
+- **文件大小**: 3.12GB（fp16 safetensors，不含量化）
+- **格式**: 标准 HuggingFace 格式，合并 LoRA 后的全量权重
 
+### 加载方式
+
+**4-bit 量化加载（推荐）** — 约 3.3GB VRAM：
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+import torch
 
-bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
-                         bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
+bnb = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_use_double_quant=True,
+)
 model = AutoModelForCausalLM.from_pretrained(
-    "Qwen3.5-4B-Catgirl", quantization_config=bnb,
-    device_map="cuda:0", trust_remote_code=True)
+    "Qwen3.5-4B-Catgirl",
+    quantization_config=bnb,
+    device_map="cuda:0",
+    trust_remote_code=True,
+    attn_implementation="sdpa",
+)
+```
+
+**fp16 全精度加载** — 约 8GB VRAM：
+```python
+model = AutoModelForCausalLM.from_pretrained(
+    "Qwen3.5-4B-Catgirl",
+    torch_dtype=torch.bfloat16,
+    device_map="cuda:0",
+    trust_remote_code=True,
+)
+```
+
+**CPU 加载** — 约 8GB 内存，无需 GPU：
+```python
+model = AutoModelForCausalLM.from_pretrained(
+    "Qwen3.5-4B-Catgirl",
+    torch_dtype=torch.bfloat16,
+    device_map="cpu",
+    trust_remote_code=True,
+)
 ```
 
 ## 能力
