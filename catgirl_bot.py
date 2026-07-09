@@ -481,21 +481,3 @@ def ask_stream(question: str, model_path: str = "vovodadakt/Qwen3.5-4B-Catgirl")
     yield from _bot.ask_stream(question)
 
 
-# ------------------------------------------------------------------
-# CLI
-# ------------------------------------------------------------------
-
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1:
-        q = " ".join(sys.argv[1:])
-    else:
-        q = input("问题: ")
-
-    bot = CatgirlBot()
-    bot.load()
-    print("\n" + "=" * 50)
-    for chunk in bot.ask_stream(q):
-        print(chunk, end="", flush=True)
-    print("\n" + "=" * 50)
-    bot.close()

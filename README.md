@@ -91,12 +91,6 @@ from catgirl_bot import ask
 print(ask("药屋少女的呢喃里猫猫的声优是谁？"))
 ```
 
-### 命令行
-
-```bash
-python catgirl_bot.py 进击的巨人最终季什么时候播出
-```
-
 ## API
 
 ### `CatgirlBot(model_path=..., lora_path=None, load_in_4bit=True, headless=True)`
