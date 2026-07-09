@@ -64,35 +64,74 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 ```
 
+## 快速使用
+
+```python
+from catgirl_bot import CatgirlBot
+
+bot = CatgirlBot()
+bot.load()
+
+# 一次性输出
+answer = bot.ask("鬼灭之刃里水之呼吸的使用者有哪些？")
+print(answer)
+
+# 流式输出（适合 QQ 机器人分段发送）
+for chunk in bot.ask_stream("木漏れ日是什么意思？"):
+    print(chunk, end="", flush=True)
+    # 或者: await send_qq_message(group_id, chunk)
+
+bot.close()
+```
+
+### 一行调用
+
+```python
+from catgirl_bot import ask
+print(ask("药屋少女的呢喃里猫猫的声优是谁？"))
+```
+
+### 命令行
+
+```bash
+python catgirl_bot.py 进击的巨人最终季什么时候播出
+```
+
+## API
+
+### `CatgirlBot(model_path=..., lora_path=None, load_in_4bit=True, headless=True)`
+
+| 方法 | 说明 |
+|------|------|
+| `load()` | 加载模型和浏览器（首次 ask 自动调用） |
+| `ask(question) -> str` | 输入问题，返回完整回答 |
+| `ask_stream(question)` | 流式输出，逐段 yield 文本，适合 QQ 分段发送 |
+| `close()` | 释放 GPU 和浏览器资源 |
+
+### 搜索管线
+
+```
+用户问题 -> 关键词提取 -> 百度百科(Browser) + 萌娘百科(API) -> <500c? -> Bing深度搜索 -> 猫娘回答
+```
+
 ## 能力
 
 - 猫娘角色扮演（提酱傲娇 / 灯酱元气）
-- 关键词提取 + 搜索回答
-- 百度百科 + 萌娘百科 + Bing 多源搜索
+- 自动搜索：百度百科 + 萌娘百科 + Bing
 - 诚实：材料没有就说不知道，不编造
-
-## 搜索管线
-
-见 `inference/search/search_pipeline.py`
-
-```
-用户问题 -> 关键词提取 -> 百度百科 + 萌娘百科 -> <500c? -> Bing -> 猫娘回答
-```
 
 ## 项目结构
 
 ```
 tideng-catgirl-bot/
-├── inference/
-│   └── search/
-│       ├── search_pipeline.py    # 搜索管线
-│       └── version_history/
-├── data_gen/                     # 训练数据生成
-├── training/                     # 训练脚本
-└── merge_lora.py                 # LoRA 合并脚本
+├── catgirl_bot.py                 # 接口（引用这个即可）
+├── inference/search/              # 搜索管线
+├── data_gen/                      # 训练数据生成
+├── training/                      # 训练脚本
+└── merge_lora.py                  # LoRA 合并脚本
 ```
 
 ## 硬件
 
 - GPU: NVIDIA RTX 4080 SUPER (16GB)
-- VRAM: ~3.3GB（单模型加载）
+- VRAM: ~3.3GB（4-bit 加载）
