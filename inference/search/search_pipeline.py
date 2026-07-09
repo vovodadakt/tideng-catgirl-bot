@@ -1,6 +1,5 @@
-"""V23: Single model — base for keywords, then load LoRA for answering.
-Saves ~5GB VRAM vs loading two separate models.
-Timing: phase1 (base kw extraction) + phase2 (LoRA answering) tracked separately.
+"""V22: Multi-keyword × (Baidu+Moegirl) → Bing only if R1 < 500c.
+Clean, simple, no model-based relevance/cleaning.
 """
 import time, torch, re, json, urllib.parse, urllib.request
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
@@ -44,22 +43,22 @@ SYSTEMS = {
 KW_GARBAGE = ['user', '问题', 'assistant', 'system', 'User', 'Question', '参考', '搜索']
 
 
-def base_generate(model, tokenizer, system_key, prompt, max_tokens=100, temp=0.1):
+def base_generate(kw_model, tokenizer, system_key, prompt, max_tokens=100, temp=0.1):
     msgs = [{"role": "system", "content": SYSTEMS[system_key]},
             {"role": "user", "content": prompt}]
     text = tokenizer.apply_chat_template(msgs, tokenize=False,
         add_generation_prompt=True, enable_thinking=False)
-    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+    inputs = tokenizer(text, return_tensors="pt").to(kw_model.device)
     with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=max_tokens, temperature=temp,
+        out = kw_model.generate(**inputs, max_new_tokens=max_tokens, temperature=temp,
             do_sample=(temp > 0.1), top_p=0.5, pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(out[0][len(inputs.input_ids[0]):], skip_special_tokens=True).strip()
 
 
-def extract_keywords(question, model, tokenizer):
+def extract_keywords(question, kw_model, tokenizer):
     examples = "\n".join([f"问题：{q}\n关键词：{kw}" for q, kw in KW_EXAMPLES.items()])
     prompt = f"{examples}\n问题：{question}\n关键词："
-    raw = base_generate(model, tokenizer, "keywords", prompt, max_tokens=30, temp=0.1)
+    raw = base_generate(kw_model, tokenizer, "keywords", prompt, max_tokens=30, temp=0.1)
     raw = raw.split('\n')[0].strip()
     raw = re.sub(r'^关键词[：:]\s*', '', raw)
     raw = re.sub(r'^Keywords[：:]\s*', '', raw)
@@ -85,22 +84,27 @@ def extract_keywords(question, model, tokenizer):
     return clean_kws[:3]
 
 
+# ═══════════ Baidu Baike (Browser) ═══════════
+
 def baidu_baike_browser(query, page):
     try:
         q_enc = urllib.parse.quote(query)
         url = f"https://baike.baidu.com/item/{q_enc}"
         page.goto(url, wait_until="commit", timeout=15000)
         page.wait_for_timeout(3000)
+
         meta = page.query_selector('meta[name="description"]')
         if meta:
             content = meta.get_attribute("content")
             if content and len(content) > 30:
                 return f"[百度百科]\n{query}：{content[:800]}"
+
         summary = page.query_selector(".lemma-summary, .basicInfo-item")
         if summary:
             text = summary.inner_text()
             if len(text) > 50:
                 return f"[百度百科]\n{query}：{text[:800]}"
+
         paras = page.query_selector_all(".para")
         texts = []
         for p in paras[:5]:
@@ -111,6 +115,7 @@ def baidu_baike_browser(query, page):
             combined = " ".join(texts)[:800]
             if len(combined) > 50:
                 return f"[百度百科]\n{query}：{combined}"
+
         body = page.query_selector("body")
         if body:
             text = body.inner_text()
@@ -122,6 +127,8 @@ def baidu_baike_browser(query, page):
     except:
         return ""
 
+
+# ═══════════ Moegirl API ═══════════
 
 def moegirl_search(query):
     try:
@@ -157,6 +164,8 @@ def moegirl_search(query):
         return ""
 
 
+# ═══════════ Bing deep search ═══════════
+
 def bing_deep_search(keywords, page, max_results=3):
     query = " ".join(keywords[:2]) if keywords else ""
     if not query:
@@ -165,6 +174,7 @@ def bing_deep_search(keywords, page, max_results=3):
         q_enc = urllib.parse.quote(query)
         page.goto(f"https://cn.bing.com/search?q={q_enc}", timeout=12000)
         page.wait_for_timeout(2000)
+
         items = page.query_selector_all("li.b_algo h2 a")
         urls, titles = [], []
         for item in items[:max_results]:
@@ -173,8 +183,10 @@ def bing_deep_search(keywords, page, max_results=3):
             if href and title and len(title) > 3:
                 urls.append(href)
                 titles.append(title)
+
         if not urls:
             return ""
+
         results = []
         for url, title in zip(urls, titles):
             content = deep_read(page, url)
@@ -183,6 +195,7 @@ def bing_deep_search(keywords, page, max_results=3):
                 print(f"      Bing: {title[:50]}... ({len(content)}c)")
             else:
                 print(f"      Bing skip: {title[:50]}")
+
         return "\n\n---\n\n".join(results)[:3000] if results else ""
     except Exception as e:
         print(f"      Bing error: {str(e)[:80]}")
@@ -200,13 +213,14 @@ def deep_read(page, url, timeout=12000):
         return ""
 
 
-# ═══════════ Phase 1: Search (base model for keywords, no LoRA) ═══════════
+# ═══════════ Main Pipeline ═══════════
 
-def search_phase(question, model, tokenizer, page):
-    """Extract keywords (base model) + search web. Returns ref text."""
-    keywords = extract_keywords(question, model, tokenizer)
+def search_pipeline(question, kw_model, tokenizer, ans_model, page):
+    t0 = time.time()
+    keywords = extract_keywords(question, kw_model, tokenizer)
     print(f"  [关键词] {keywords}")
 
+    # ── R1: Baidu + Moegirl for each keyword ──
     r1_parts = []
     total_c = 0
     for kw in keywords:
@@ -215,6 +229,7 @@ def search_phase(question, model, tokenizer, page):
             r1_parts.append(baidu)
             total_c += len(baidu)
             print(f"    百度({kw}): {len(baidu)}c")
+
         moe = moegirl_search(kw)
         if moe:
             r1_parts.append(moe)
@@ -222,45 +237,39 @@ def search_phase(question, model, tokenizer, page):
             print(f"    萌娘({kw}): {len(moe)}c")
 
     print(f"  [R1] total={total_c}c, parts={len(r1_parts)}")
-
     r1_text = "\n\n---\n\n".join(r1_parts)[:5000] if r1_parts else ""
     all_refs = [r1_text] if r1_text else []
     stage = "R1"
 
+    # ── R2: Bing ONLY if R1 < 500c ──
     if total_c < 500:
-        print(f"  [R2] Bing...")
+        print(f"  [R2] Bing (R1不足)...")
         bing = bing_deep_search(keywords, page)
         if bing:
             all_refs.append(bing)
             stage = "R1+Bing"
 
+    # ── Merge ──
     ref = "\n\n---\n\n".join(all_refs)[:3000].strip()
-    print(f"  [搜索完成] ref={len(ref)}c [存储待回答]")
-    return ref, stage
 
-
-# ═══════════ Phase 2: Answer (LoRA model) ═══════════
-
-def answer_phase(question, ref_text, model, tokenizer):
-    """Generate catgirl answer using LoRA model from pre-searched ref."""
-    if len(ref_text) < 200:
+    if len(ref) < 200:
         instruction = "搜索未能找到答案。请诚实告诉用户：没找到相关信息，建议换个关键词。不准编造。"
+        stage += "(不足)"
     else:
         instruction = "请严格只使用参考资料中的信息回答。材料里有就引用，材料里没有就说不知道。不准编造数字、日期、人名、招式名。"
 
-    user_msg = f"{question}\n\n[参考资料]\n{ref_text}\n[/参考资料]\n\n{instruction}"
+    user_msg = f"{question}\n\n[参考资料]\n{ref}\n[/参考资料]\n\n{instruction}"
     msgs = [{"role": "system", "content": SYSTEMS["answer"]}, {"role": "user", "content": user_msg}]
 
     text = tokenizer.apply_chat_template(msgs, tokenize=False,
         add_generation_prompt=True, enable_thinking=True)
-    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+    inputs = tokenizer(text, return_tensors="pt").to(ans_model.device)
     plen = inputs.input_ids.shape[1]
 
-    t0 = time.time()
     with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=500, temperature=0.85,
+        out = ans_model.generate(**inputs, max_new_tokens=500, temperature=0.85,
             top_p=0.92, do_sample=True, pad_token_id=tokenizer.pad_token_id)
-    gen_time = time.time() - t0
+    elapsed = time.time() - t0
 
     raw = tokenizer.decode(out[0][plen:], skip_special_tokens=True)
     for marker in ["\nuser", "\nassistant", "\n<|user|>", "\n<|assistant|>"]:
@@ -272,26 +281,17 @@ def answer_phase(question, ref_text, model, tokenizer):
     clean = re.sub(r'</?think>\s*', '', clean).strip()
     clean = re.sub(r'^assistant\s*', '', clean).strip()
 
-    print(f"  [生成] {gen_time:.1f}s")
+    print(f"  [ref {len(ref)}c] ({elapsed:.1f}s) [{stage}]")
     for line in clean.split('\n')[:30]:
         if line.strip():
             print(f"  {line.strip()[:150]}")
+
     return clean
 
 
 # ═══════════ MAIN ═══════════
 
-questions = [
-    "鬼灭之刃里水之呼吸的使用者有哪些？水之呼吸有多少种招式？",
-    "进击的巨人最终季什么时候播出的？分几部分？",
-    "「木漏れ日」这个词是什么意思？",
-    "药屋少女的呢喃里猫猫的声优是谁？",
-]
-
-# ── Load base model ONCE ──
-t_start = time.time()
-t0 = time.time()
-print("[0] Loading tokenizer + base model...")
+print("Loading base model...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
@@ -299,15 +299,19 @@ if tokenizer.pad_token is None:
 bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                          bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
 
-model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, quantization_config=bnb,
+kw_model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, quantization_config=bnb,
     device_map="cuda:0", trust_remote_code=True, attn_implementation="sdpa")
-model.eval()
-t_base_load = time.time() - t0
-print(f"  Base model ready ({t_base_load:.1f}s)")
+kw_model.eval()
+print("Base model ready.")
 
-# ── Start browser ONCE ──
-t0 = time.time()
-print("[1] Starting browser...")
+print("Loading LoRA...")
+base = AutoModelForCausalLM.from_pretrained(MODEL_PATH, quantization_config=bnb,
+    device_map="cuda:0", trust_remote_code=True, attn_implementation="sdpa")
+ans_model = PeftModel.from_pretrained(base, LORA_PATH)
+ans_model.eval()
+print("LoRA ready.")
+
+print("Starting browser...")
 p = sync_playwright().start()
 browser = p.chromium.launch(headless=True, args=[
     "--no-sandbox", "--disable-gpu", "--no-zygote", "--disable-setuid-sandbox"
@@ -318,65 +322,21 @@ context.add_init_script("""
     window.chrome = {runtime: {}};
 """)
 page = context.new_page()
-t_browser = time.time() - t0
-print(f"  Browser ready ({t_browser:.1f}s)")
+print("Browser ready.\n")
 
-# ── Phase 1: Search ALL questions (base model only) ──
-print("\n" + "="*55)
-print("[2] PHASE 1: 搜索 (基膜关键词 + Web)")
-print("="*55)
-t0 = time.time()
 
-search_results = []
+questions = [
+    "鬼灭之刃里水之呼吸的使用者有哪些？水之呼吸有多少种招式？",
+    "进击的巨人最终季什么时候播出的？分几部分？",
+    "「木漏れ日」这个词是什么意思？",
+    "药屋少女的呢喃里猫猫的声优是谁？",
+]
+
 for qi, q in enumerate(questions):
-    print(f"\nQ{qi+1}: {q}")
-    t_q = time.time()
-    ref, stage = search_phase(q, model, tokenizer, page)
-    search_results.append(ref)
-    print(f"  Q{qi+1}搜索耗时: {time.time()-t_q:.1f}s")
-
-t_phase1 = time.time() - t0
-print(f"\n  阶段1总计: {t_phase1:.1f}s")
-
-# ── Switch to LoRA ──
-print("\n" + "="*55)
-print("[3] 加载 LoRA 适配器...")
-print("="*55)
-t0 = time.time()
-
-model = PeftModel.from_pretrained(model, LORA_PATH)
-model.eval()
-t_lora = time.time() - t0
-print(f"  LoRA ready ({t_lora:.1f}s)")
-
-# ── Phase 2: Answer ALL questions (LoRA model) ──
-print("\n" + "="*55)
-print("[4] PHASE 2: 回答 (LoRA模型)")
-print("="*55)
-t0 = time.time()
-
-for qi, (q, ref) in enumerate(zip(questions, search_results)):
-    print(f"\nQ{qi+1}: {q}")
-    print(f"  [ref {len(ref)}c]")
-    t_q = time.time()
-    answer_phase(q, ref, model, tokenizer)
-    print(f"  Q{qi+1}回答耗时: {time.time()-t_q:.1f}s")
-
-t_phase2 = time.time() - t0
-t_total = time.time() - t_start
-
-print("\n" + "="*55)
-print("===== V23 TIMING vs V22 =====")
-print(f"  基膜加载:       {t_base_load:.1f}s")
-print(f"  浏览器:         {t_browser:.1f}s")
-print(f"  阶段1 搜索4题:  {t_phase1:.1f}s")
-print(f"  LoRA加载:       {t_lora:.1f}s")
-print(f"  阶段2 回答4题:  {t_phase2:.1f}s")
-print(f"  ─────────────────────")
-print(f"  总耗时:         {t_total:.1f}s")
-print(f"  V22参考(双模型): ~390s")
-print("="*55)
+    print(f"\n{'='*55}")
+    print(f"Q{qi+1}: {q}")
+    search_pipeline(q, kw_model, tokenizer, ans_model, page)
 
 browser.close()
 p.stop()
-print("===== DONE =====")
+print("\n===== DONE =====")
